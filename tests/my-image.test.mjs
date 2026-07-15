@@ -2,16 +2,17 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectImageInfo, inferSize } from "../scripts/generate.mjs";
-import { normalizeBaseUrl } from "../scripts/verify-config.mjs";
+import { editEndpoint, normalizeBaseUrl } from "../scripts/verify-config.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configureScript = join(repoRoot, "scripts", "configure.mjs");
+const editScript = join(repoRoot, "scripts", "edit.mjs");
 const verifyScript = join(repoRoot, "scripts", "verify-config.mjs");
 const generateScript = join(repoRoot, "scripts", "generate.mjs");
 const fakeKey = "test-api-key-never-print-this-value";
@@ -83,6 +84,7 @@ async function testConfigFile(root) {
   const status = JSON.parse(verified.stdout);
   assert.equal(status.config.model, "gpt-image-2");
   assert.equal(status.config.endpoint, "https://example.test/v1/images/generations");
+  assert.equal(editEndpoint(status.config.baseUrl), "https://example.test/v1/images/edits");
   assert.throws(() => normalizeBaseUrl("https://example.test/v1?token=bad"));
 }
 
@@ -124,11 +126,27 @@ async function testBrowserSetup(root) {
 }
 
 async function startMockApi() {
-  const requests = [];
+  const requests = { generation: [], edit: [] };
   const server = createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/image.png") {
       response.writeHead(200, { "Content-Type": "image/png" });
       response.end(png);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/images/edits") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const raw = Buffer.concat(chunks).toString("latin1");
+      requests.edit.push({ contentType: request.headers["content-type"], raw });
+
+      if (raw.includes("auth-edit-mode")) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: `bad key ${fakeKey}` } }));
+        return;
+      }
+
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/images/generations") {
@@ -139,7 +157,7 @@ async function startMockApi() {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
-    requests.push(body);
+    requests.generation.push(body);
 
     if (body.prompt.includes("auth-mode")) {
       response.writeHead(401, { "Content-Type": "application/json" });
@@ -230,7 +248,59 @@ async function testGeneration(root) {
     assert.equal(authResult.code, 1);
     assert(!authResult.stdout.includes(fakeKey), "generation output leaked API key");
     assert.equal(JSON.parse(authResult.stdout).results[0].code, "AUTH_FAILED");
-    assert(api.requests.every((item) => item.model === "gpt-image-2"));
+    assert(api.requests.generation.every((item) => item.model === "gpt-image-2"));
+
+    const inputPath = join(root, "edit-input.png");
+    const referencePath = join(root, "edit-reference.png");
+    const maskPath = join(root, "edit-mask.png");
+    const opaqueMaskPath = join(root, "edit-opaque-mask.png");
+    const opaquePng = Buffer.from(png);
+    opaquePng[25] = 2;
+    await Promise.all([
+      writeFile(inputPath, png),
+      writeFile(referencePath, png),
+      writeFile(maskPath, png),
+      writeFile(opaqueMaskPath, opaquePng),
+    ]);
+
+    const opaqueMaskResult = await run(
+      "node",
+      [editScript, "--image", inputPath, "--mask", opaqueMaskPath, "--prompt", "edit-mode"],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+    );
+    assert.equal(opaqueMaskResult.code, 1);
+    assert(opaqueMaskResult.stderr.includes("Alpha"));
+
+    const editResult = await run(
+      "node",
+      [
+        editScript,
+        "--image", inputPath,
+        "--image", referencePath,
+        "--mask", maskPath,
+        "--prompt", "edit-mode keep the subject unchanged",
+        "--output-dir", outputDir,
+      ],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+    );
+    assert.equal(editResult.code, 0, `${editResult.stderr}\n${editResult.stdout}`);
+    const editSummary = JSON.parse(editResult.stdout);
+    assert.equal(editSummary.operation, "edit");
+    assert.equal(editSummary.results[0].actualSize, "1x1");
+    const editRequest = api.requests.edit.at(-1);
+    assert(editRequest.contentType.startsWith("multipart/form-data; boundary="));
+    assert(editRequest.raw.includes('name="image[]"'));
+    assert(editRequest.raw.includes('name="mask"'));
+    assert(editRequest.raw.includes("edit-mode keep the subject unchanged"));
+
+    const editAuthResult = await run(
+      "node",
+      [editScript, "--image", inputPath, "--prompt", "auth-edit-mode", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+    );
+    assert.equal(editAuthResult.code, 1);
+    assert(!editAuthResult.stdout.includes(fakeKey), "edit output leaked API key");
+    assert.equal(JSON.parse(editAuthResult.stdout).code, "AUTH_FAILED");
   } finally {
     await api.close();
   }

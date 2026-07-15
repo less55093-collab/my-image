@@ -1,11 +1,11 @@
 ---
 name: my-image
-description: Generate and display images through a user-supplied OpenAI-compatible Images API. Use when the user invokes $my-image or asks to create AI images with their own Base URL and API key, including first-time setup, automatic gpt-image-2 model selection, prompt-based resolution and aspect-ratio selection, multiple variants, local image saving, and inline result display.
+description: Generate, edit, and display images through a user-supplied OpenAI-compatible Images API. Use when the user invokes $my-image or asks to create or modify AI images with their own Base URL and API key, including first-time setup, gpt-image-2 generation, image edits, multi-image compositing, optional masks, automatic resolution selection, local saving, and inline result display.
 ---
 
 # My Image
 
-Generate images through the user's OpenAI-compatible `/images/generations` endpoint. Keep the interaction usable for someone who only knows their Base URL, API key, and desired picture.
+Generate or edit images through the user's OpenAI-compatible `/images/generations` and `/images/edits` endpoints. Keep the interaction usable for someone who only knows their Base URL, API key, source image, and desired result.
 
 ## Workflow
 
@@ -17,8 +17,9 @@ Generate images through the user's OpenAI-compatible `/images/generations` endpo
    ```
 
 3. If configuration is missing or invalid, start setup automatically. Do not require the user to say "configure" first.
-4. Choose the prompt, model, size, quality, count, concurrency, and output directory from the request.
-5. Run `scripts/generate.mjs`, parse its JSON result, inspect every generated image, and show valid images inline using absolute paths.
+4. Treat a request that changes, removes, replaces, combines, extends, or preserves part of an existing image as an edit. Treat a request without an edit target as generation.
+5. Choose the prompt, model, size, quality, count, concurrency, and output directory from the request.
+6. Run `scripts/generate.mjs` or `scripts/edit.mjs`, parse its JSON result, inspect every output image, and show valid images inline using absolute paths.
 
 ## First-Time Setup
 
@@ -76,6 +77,37 @@ node <skill-dir>/scripts/generate.mjs \
 
 Use a user-specified destination when present. Otherwise save under the current workspace at `outputs/my-image/`. The generator accepts Base64 image data and downloadable image URLs, validates PNG/JPEG/WebP signatures, avoids overwriting files, and makes one compatibility fallback only when the API explicitly rejects the requested dimensions.
 
+## Editing Existing Images
+
+Use `scripts/edit.mjs` when the user wants to change an existing image. Inspect each local input with `view_image` before calling the API. Identify the edit target separately from supporting reference or compositing images.
+
+Build the edit prompt with explicit invariants: state what must change and what must remain unchanged. Preserve identity, pose, composition, product geometry, text, lighting, or background whenever the user did not ask to alter them. Do not promise pixel-perfect mask boundaries.
+
+Use one repeated `--image` argument per input image. Their order is meaningful; describe each input by index and role in the prompt. A provided mask must be a PNG with Alpha or transparency information and the same dimensions as the first input image.
+
+Example:
+
+```bash
+node <skill-dir>/scripts/edit.mjs \
+  --image <absolute-edit-target> \
+  --prompt-file <workspace-temp-prompt> \
+  --size auto \
+  --count 1 \
+  --output-dir <absolute-output-directory>
+```
+
+Optional mask:
+
+```bash
+node <skill-dir>/scripts/edit.mjs \
+  --image <absolute-edit-target> \
+  --mask <absolute-png-mask> \
+  --prompt-file <workspace-temp-prompt> \
+  --output-dir <absolute-output-directory>
+```
+
+For multiple inputs, use `--image` repeatedly. The editor accepts PNG, JPEG, and WebP inputs up to 50MB each, limits all input data to 200MB, and supports up to 16 input images. Default `--size auto` preserves the first image's broad orientation. Do not automatically retry failed edits because a retry may produce a different result or additional billing.
+
 ## Result Handling
 
 Read the generator's JSON summary. For each successful path:
@@ -87,4 +119,4 @@ Read the generator's JSON summary. For each successful path:
 
 If some variants fail, show the successful ones and report the failed count. If all fail, report the sanitized API error. On `AUTH_FAILED`, run setup; on `RATE_LIMITED`, stop without an automatic retry so the user retains control over additional billing.
 
-This skill generates new images only. Do not claim image editing, masks, inpainting, or transparent-background editing support.
+This skill supports generation and prompt-guided edits. It does not guarantee exact pixel boundaries, deterministic identity preservation, native layered files, or transparent-background output.

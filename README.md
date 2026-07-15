@@ -1,6 +1,6 @@
 # My Image
 
-`my-image` 是一个面向 Codex 的自定义生图 Skill。用户只需要描述想要的图片；Skill 会自动检查配置、引导填写 Base URL 和 API Key、选择 `gpt-image-2`、推断合适的尺寸，并在生成后保存、检查和展示图片。
+`my-image` 是一个面向 Codex 的自定义图片生成与编辑 Skill。用户只需要描述想要的新图片或对现有图片的修改；Skill 会自动检查配置、引导填写 Base URL 和 API Key、选择 `gpt-image-2`、推断合适的尺寸，并在处理后保存、检查和展示图片。
 
 它适合使用第三方 OpenAI Images API 兼容服务，同时不要求普通用户理解环境变量、JSON 或命令行参数。
 
@@ -13,6 +13,7 @@
 - 支持一次生成 1 到 10 张图片，并限制并发，避免无意增加费用。
 - 兼容 `data[0].b64_json` 和 `data[0].url` 两种 OpenAI 风格响应。
 - 支持 PNG、JPEG 和 WebP，并读取文件中的实际宽高。
+- 支持单图编辑、多图合成和可选 PNG 蒙版。
 - 第三方接口拒绝尺寸时，仅对明确的尺寸错误执行一次兼容降级。
 - API Key 不写入仓库，不在正常输出中回显。
 - 生成后由 Codex 检查图片，并通过绝对路径直接显示。
@@ -25,6 +26,7 @@
 
   ```text
   POST <BASE_URL>/images/generations
+  POST <BASE_URL>/images/edits
   ```
 
 - 服务至少接受 `model`、`prompt`、`size` 和 `n` 字段。
@@ -70,6 +72,18 @@ $my-image 生成 3 张网站首屏横幅，现代建筑摄影，16:9
 
 ```text
 $my-image 生成一张 9:16 手机壁纸，雨夜霓虹街道，照片级真实
+```
+
+编辑现有图片：
+
+```text
+$my-image 把这张商品图的背景替换成白色摄影棚，商品本身保持不变
+```
+
+合成多张图片：
+
+```text
+$my-image 把第一张图中的人物放到第二张图的室内场景中，保持人物身份和服装
 ```
 
 ## 首次配置
@@ -154,6 +168,18 @@ TIMEOUT_MS="300000"
 }
 ```
 
+编辑接口使用 `multipart/form-data`，核心字段为：
+
+| 字段 | 说明 |
+| --- | --- |
+| `model` | 默认 `gpt-image-2` |
+| `prompt` | 编辑要求和必须保持不变的内容 |
+| `image` / `image[]` | 一张或多张输入图片 |
+| `mask` | 可选 PNG 蒙版，需包含透明信息且尺寸与第一张输入图片一致 |
+| `size` | 输出尺寸 |
+| `n` | 输出数量 |
+| `quality` | 可选质量参数 |
+
 ## 脚本
 
 ### 检查配置
@@ -186,6 +212,38 @@ node scripts/generate.mjs \
   --output-dir outputs/my-image
 ```
 
+### 编辑图片
+
+```bash
+node scripts/edit.mjs \
+  --image input.png \
+  --prompt "只把背景替换成白色摄影棚，主体保持不变" \
+  --size auto \
+  --output-dir outputs/my-image
+```
+
+多图合成时重复传入 `--image`。输入顺序有意义，应在提示词中说明每张图片的角色：
+
+```bash
+node scripts/edit.mjs \
+  --image person.png \
+  --image room.png \
+  --prompt "把图片 1 的人物放入图片 2 的房间，保持人物身份、服装和姿势" \
+  --output-dir outputs/my-image
+```
+
+可选蒙版：
+
+```bash
+node scripts/edit.mjs \
+  --image input.png \
+  --mask mask.png \
+  --prompt "只修改蒙版区域内的背景" \
+  --output-dir outputs/my-image
+```
+
+每个输入文件最大 50MB，所有输入图片和蒙版合计最大 200MB，最多 16 张输入图片。
+
 常用参数：
 
 | 参数 | 说明 |
@@ -217,6 +275,8 @@ npm test
 - 自动尺寸推断。
 - PNG、JPEG 和 WebP 实际宽高读取。
 - Base64 和 URL 图片响应。
+- multipart 图片编辑、多图输入和蒙版上传。
+- 蒙版透明信息和输入大小限制。
 - 尺寸拒绝后的单次兼容降级。
 - `401` 鉴权错误分类。
 - 多图并发和文件名唯一性。
@@ -233,6 +293,7 @@ my-image/
 │   └── openai.yaml
 ├── scripts/
 │   ├── configure.mjs
+│   ├── edit.mjs
 │   ├── generate.mjs
 │   └── verify-config.mjs
 └── tests/
@@ -241,10 +302,11 @@ my-image/
 
 ## 已知限制
 
-- 当前只支持新图片生成，不支持图片编辑、蒙版、局部重绘或透明背景编辑。
+- 图片编辑由模型和提示词引导，不保证蒙版像素边界、身份保持或文字排版完全确定。
+- 不支持原生分层文件，也不保证透明背景输出。
 - 接口必须兼容 OpenAI Images API 的核心请求和响应结构。
 - 配置文件包含明文 API Key。脚本会在 macOS/Linux 设置 `0600` 权限，并在 Windows 尝试收紧 ACL，但用户仍应保护本地账户和磁盘。
-- macOS 已完成真实接口验证；Windows 和 Linux 路径有自动化覆盖，但仍建议在目标系统做一次实际配置与生成验收。
+- macOS 已完成真实生成和单图编辑验证；多图与蒙版通过本地模拟接口验证。Windows 和 Linux 路径有自动化覆盖，但仍建议在目标系统做一次实际验收。
 
 ## 许可证
 

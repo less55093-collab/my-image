@@ -86,10 +86,20 @@ export function normalizeBaseUrl(value) {
   return trimmed;
 }
 
+export function imageEndpoint(baseUrl, operation) {
+  const suffix = operation === "edit" ? "edits" : "generations";
+  if (/\/images\/(?:generations|edits)$/.test(baseUrl)) {
+    return baseUrl.replace(/\/images\/(?:generations|edits)$/, `/images/${suffix}`);
+  }
+  return `${baseUrl}/images/${suffix}`;
+}
+
 export function generationEndpoint(baseUrl) {
-  return baseUrl.endsWith("/images/generations")
-    ? baseUrl
-    : `${baseUrl}/images/generations`;
+  return imageEndpoint(baseUrl, "generate");
+}
+
+export function editEndpoint(baseUrl) {
+  return imageEndpoint(baseUrl, "edit");
 }
 
 function positiveInteger(value, fallback) {

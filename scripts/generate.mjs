@@ -229,7 +229,7 @@ function fallbackSize(size) {
   return "1024x1024";
 }
 
-function sanitize(value, apiKey) {
+export function sanitize(value, apiKey) {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   return text.replaceAll(apiKey, "[REDACTED]").slice(0, 4_000);
 }
@@ -259,8 +259,23 @@ async function callApi({ endpoint, apiKey, model, prompt, size, quality, timeout
   return body;
 }
 
-function timestamp() {
+export function timestamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(".", "");
+}
+
+export async function saveImageItem({ item, endpoint, timeoutMs, outputDir, filenameBase }) {
+  const { buffer, contentType } = await imageBytes(item, endpoint, timeoutMs);
+  if (buffer.length < 32) throw new Error("接口返回的图片文件过小或已损坏");
+  const imageInfo = detectImageInfo(buffer, contentType);
+  const outputPath = resolve(outputDir, `${filenameBase}.${imageInfo.extension}`);
+  await writeFile(outputPath, buffer, { flag: "wx" });
+  const actualSize = imageInfo.width && imageInfo.height ? `${imageInfo.width}x${imageInfo.height}` : null;
+  return {
+    path: outputPath,
+    bytes: buffer.length,
+    actualSize,
+    size: actualSize,
+  };
 }
 
 async function generateOne(context, requestNumber) {
@@ -280,23 +295,22 @@ async function generateOne(context, requestNumber) {
       body = await callApi({ ...context, size: requestSize });
     }
 
-    const item = body.data?.[0] || {};
-    const { buffer, contentType } = await imageBytes(item, context.endpoint, context.timeoutMs);
-    if (buffer.length < 32) throw new Error("接口返回的图片文件过小或已损坏");
-    const imageInfo = detectImageInfo(buffer, contentType);
-    const extension = imageInfo.extension;
-    const filename = `image-${context.runId}-${String(requestNumber).padStart(3, "0")}.${extension}`;
-    const outputPath = resolve(context.outputDir, filename);
-    await writeFile(outputPath, buffer, { flag: "wx" });
+    const saved = await saveImageItem({
+      item: body.data?.[0] || {},
+      endpoint: context.endpoint,
+      timeoutMs: context.timeoutMs,
+      outputDir: context.outputDir,
+      filenameBase: `image-${context.runId}-${String(requestNumber).padStart(3, "0")}`,
+    });
 
     return {
       ok: true,
       requestNumber,
-      path: outputPath,
-      bytes: buffer.length,
+      path: saved.path,
+      bytes: saved.bytes,
       requestedSize: requestSize,
-      actualSize: imageInfo.width && imageInfo.height ? `${imageInfo.width}x${imageInfo.height}` : null,
-      size: imageInfo.width && imageInfo.height ? `${imageInfo.width}x${imageInfo.height}` : requestSize,
+      actualSize: saved.actualSize,
+      size: saved.actualSize || requestSize,
       usedFallback,
       elapsedMs: Math.round(performance.now() - startedAt),
     };
