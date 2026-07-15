@@ -1,0 +1,13 @@
+{
+  "name": "my-image-codex-skill",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Codex skill for custom OpenAI-compatible image generation APIs",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/my-image.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

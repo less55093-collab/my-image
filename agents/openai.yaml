@@ -1,0 +1,4 @@
+interface:
+  display_name: "My Image"
+  short_description: "通过自定义 GPT Image 接口智能生成、保存并展示图片"
+  default_prompt: "使用 $my-image 根据我的描述生成图片，并自动选择合适的尺寸。"

@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+coverage/
+outputs/
+generated_images/
+*.tmp
+*.log
