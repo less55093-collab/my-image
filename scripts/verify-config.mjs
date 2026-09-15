@@ -5,7 +5,7 @@ import { homedir, platform } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const DEFAULT_MODEL = "gpt-image-2";
+const DEFAULT_MODEL = "gpt-image-2.5";
 const DEFAULT_TIMEOUT_MS = 300_000;
 
 export function getConfigPath(env = process.env) {
@@ -100,6 +100,41 @@ export function generationEndpoint(baseUrl) {
 
 export function editEndpoint(baseUrl) {
   return imageEndpoint(baseUrl, "edit");
+}
+
+export function modelsEndpoint(baseUrl) {
+  const normalized = String(baseUrl || "").replace(/\/+$/, "");
+  if (/\/images\/(?:generations|edits)$/.test(normalized)) {
+    return normalized.replace(/\/images\/(?:generations|edits)$/, "/models");
+  }
+  if (/\/models$/.test(normalized)) return normalized;
+  return `${normalized}/models`;
+}
+
+export async function fetchModels({ baseUrl, apiKey, timeoutMs = 30_000 }) {
+  const endpoint = modelsEndpoint(baseUrl);
+  const response = await fetch(endpoint, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const raw = await response.text();
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = { raw };
+  }
+  if (!response.ok) {
+    const message = typeof body?.error?.message === "string" ? body.error.message : `HTTP ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  const items = Array.isArray(body?.data) ? body.data : [];
+  const models = items
+    .map((item) => (typeof item === "string" ? item : item?.id))
+    .filter((id) => typeof id === "string" && id.trim());
+  return { endpoint, models: [...new Set(models)] };
 }
 
 function positiveInteger(value, fallback) {

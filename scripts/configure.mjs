@@ -46,7 +46,7 @@ async function save(values) {
   const result = await saveConfig({
     baseUrl: values.baseUrl ?? values.OPENAI_BASE_URL,
     apiKey: values.apiKey ?? values.OPENAI_API_KEY,
-    model: values.model ?? values.IMAGE_MODEL ?? "gpt-image-2",
+    model: values.model ?? values.IMAGE_MODEL ?? "gpt-image-2.5",
     defaultSize: values.defaultSize ?? values.IMAGE_SIZE ?? "auto",
     timeoutMs: values.timeoutMs ?? values.TIMEOUT_MS ?? 300_000,
   });
@@ -105,7 +105,7 @@ function htmlPage(token, configPath, nonce) {
 <body>
   <main>
     <h1>My Image</h1>
-    <p>填写两项即可开始生图。模型已默认设为 gpt-image-2。</p>
+    <p>填写两项即可开始生图。模型已默认设为 gpt-image-2.5，可按需修改。</p>
     <form id="setup-form">
       <label for="base-url">Base URL</label>
       <input id="base-url" name="baseUrl" type="url" required autofocus placeholder="https://example.com/v1" autocomplete="url">
@@ -117,7 +117,7 @@ function htmlPage(token, configPath, nonce) {
       </div>
 
       <label for="model">模型</label>
-      <input id="model" name="model" value="gpt-image-2" spellcheck="false">
+      <input id="model" name="model" value="gpt-image-2.5" spellcheck="false">
       <div class="hint">配置文件：${safePath}</div>
 
       <button type="submit">保存配置</button>

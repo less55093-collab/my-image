@@ -8,13 +8,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectImageInfo, inferSize } from "../scripts/generate.mjs";
-import { editEndpoint, normalizeBaseUrl } from "../scripts/verify-config.mjs";
+import { editEndpoint, modelsEndpoint, normalizeBaseUrl } from "../scripts/verify-config.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configureScript = join(repoRoot, "scripts", "configure.mjs");
 const editScript = join(repoRoot, "scripts", "edit.mjs");
 const verifyScript = join(repoRoot, "scripts", "verify-config.mjs");
 const generateScript = join(repoRoot, "scripts", "generate.mjs");
+const modelsScript = join(repoRoot, "scripts", "models.mjs");
 const fakeKey = "test-api-key-never-print-this-value";
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z0YQAAAAASUVORK5CYII=",
@@ -62,7 +63,7 @@ async function run(command, args, options = {}) {
 async function configureViaStdin(configPath, baseUrl) {
   const result = await run("node", [configureScript, "--stdin-json"], {
     env: { MY_IMAGE_GEN_ENV_FILE: configPath },
-    stdin: JSON.stringify({ baseUrl, apiKey: fakeKey, model: "gpt-image-2" }),
+    stdin: JSON.stringify({ baseUrl, apiKey: fakeKey, model: "gpt-image-2.5" }),
   });
   assert.equal(result.code, 0, result.stderr);
   assert(!result.stdout.includes(fakeKey), "configure output leaked API key");
@@ -73,7 +74,7 @@ async function testConfigFile(root) {
   await configureViaStdin(configPath, "https://example.test/v1");
   const content = await readFile(configPath, "utf8");
   assert(content.includes("OPENAI_BASE_URL"));
-  assert(content.includes("gpt-image-2"));
+  assert(content.includes("gpt-image-2.5"));
   if (process.platform !== "win32") assert.equal((await stat(configPath)).mode & 0o777, 0o600);
 
   const verified = await run("node", [verifyScript, "--json"], {
@@ -82,7 +83,7 @@ async function testConfigFile(root) {
   assert.equal(verified.code, 0, verified.stderr);
   assert(!verified.stdout.includes(fakeKey), "verify output leaked API key");
   const status = JSON.parse(verified.stdout);
-  assert.equal(status.config.model, "gpt-image-2");
+  assert.equal(status.config.model, "gpt-image-2.5");
   assert.equal(status.config.endpoint, "https://example.test/v1/images/generations");
   assert.equal(editEndpoint(status.config.baseUrl), "https://example.test/v1/images/edits");
   assert.throws(() => normalizeBaseUrl("https://example.test/v1?token=bad"));
@@ -112,12 +113,12 @@ async function testBrowserSetup(root) {
 
   const page = await fetch(setupUrl);
   assert.equal(page.status, 200);
-  assert((await page.text()).includes("gpt-image-2"));
+  assert((await page.text()).includes("gpt-image-2.5"));
   const parsed = new URL(setupUrl);
   const saved = await fetch(`${parsed.origin}/save?token=${encodeURIComponent(parsed.searchParams.get("token"))}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ baseUrl: "https://browser.example/v1", apiKey: fakeKey, model: "gpt-image-2" }),
+    body: JSON.stringify({ baseUrl: "https://browser.example/v1", apiKey: fakeKey, model: "gpt-image-2.5" }),
   });
   assert.equal(saved.status, 200, await saved.text());
   const code = await new Promise((resolveCode) => child.once("close", resolveCode));
@@ -128,6 +129,14 @@ async function testBrowserSetup(root) {
 async function startMockApi() {
   const requests = { generation: [], edit: [] };
   const server = createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ object: "list", data: [
+        { id: "gpt-image-2", object: "model" },
+        { id: "gpt-image-2.5", object: "model" },
+      ] }));
+      return;
+    }
     if (request.method === "GET" && request.url === "/image.png") {
       response.writeHead(200, { "Content-Type": "image/png" });
       response.end(png);
@@ -248,7 +257,38 @@ async function testGeneration(root) {
     assert.equal(authResult.code, 1);
     assert(!authResult.stdout.includes(fakeKey), "generation output leaked API key");
     assert.equal(JSON.parse(authResult.stdout).results[0].code, "AUTH_FAILED");
-    assert(api.requests.generation.every((item) => item.model === "gpt-image-2"));
+    assert(api.requests.generation.every((item) => item.model === "gpt-image-2.5"));
+
+    assert.equal(modelsEndpoint(api.baseUrl), `${api.baseUrl}/models`);
+    assert.equal(modelsEndpoint(`${api.baseUrl}/images/generations`), `${api.baseUrl}/models`);
+
+    const modelsResult = await run("node", [modelsScript, "--json"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+    });
+    assert.equal(modelsResult.code, 0, modelsResult.stderr);
+    assert(!modelsResult.stdout.includes(fakeKey), "models output leaked API key");
+    const modelsSummary = JSON.parse(modelsResult.stdout);
+    assert.equal(modelsSummary.currentModel, "gpt-image-2.5");
+    assert(modelsSummary.models.includes("gpt-image-2.5"));
+
+    const setResult = await run("node", [modelsScript, "--set", "gpt-image-2"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+    });
+    assert.equal(setResult.code, 0, setResult.stderr);
+    const verifiedAfterSet = await run("node", [verifyScript, "--json"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+    });
+    assert.equal(JSON.parse(verifiedAfterSet.stdout).config.model, "gpt-image-2");
+
+    const missingModelResult = await run("node", [modelsScript, "--set", "no-such-model"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+    });
+    assert.equal(missingModelResult.code, 1);
+    assert.equal(JSON.parse(missingModelResult.stdout).code, "MODEL_NOT_FOUND");
+
+    await run("node", [modelsScript, "--set", "gpt-image-2.5"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+    });
 
     const inputPath = join(root, "edit-input.png");
     const referencePath = join(root, "edit-reference.png");

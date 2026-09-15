@@ -1,6 +1,6 @@
 # My Image
 
-`my-image` 是一个面向 Codex 的自定义图片生成与编辑 Skill。用户只需要描述想要的新图片或对现有图片的修改；Skill 会自动检查配置、引导填写 Base URL 和 API Key、选择 `gpt-image-2`、推断合适的尺寸，并在处理后保存、检查和展示图片。
+`my-image` 是一个面向 Codex 的自定义图片生成与编辑 Skill。用户只需要描述想要的新图片或对现有图片的修改；Skill 会自动检查配置、引导填写 Base URL 和 API Key、选择 `gpt-image-2.5`、推断合适的尺寸，并在处理后保存、检查和展示图片。
 
 它适合使用第三方 OpenAI Images API 兼容服务，同时不要求普通用户理解环境变量、JSON 或命令行参数。
 
@@ -8,7 +8,7 @@
 
 - 首次调用自动检查配置，不要求用户预先说“配置”。
 - 自动打开本地配置页，只需填写 Base URL 和 API Key。
-- 默认模型为 `gpt-image-2`，支持按单次请求覆盖。
+- 默认模型为 `gpt-image-2.5`，支持按单次请求覆盖；`scripts/models.mjs` 可列出上游可用模型并切换默认模型。
 - 根据头像、海报、横幅、室内场景、手机壁纸和 4K 等描述自动选择尺寸。
 - 支持一次生成 1 到 10 张图片，并限制并发，避免无意增加费用。
 - 兼容 `data[0].b64_json` 和 `data[0].url` 两种 OpenAI 风格响应。
@@ -94,7 +94,7 @@ $my-image 把第一张图中的人物放到第二张图的室内场景中，保�
 
 - `Base URL`，例如 `https://example.com/v1`
 - `API Key`
-- 模型，可不修改，默认是 `gpt-image-2`
+- 模型，可不修改，默认是 `gpt-image-2.5`
 
 保存后，Skill 会继续执行用户原来的生图请求，不需要重新描述。
 
@@ -112,7 +112,7 @@ $my-image 把第一张图中的人物放到第二张图的室内场景中，保�
 ```dotenv
 OPENAI_BASE_URL="https://example.com/v1"
 OPENAI_API_KEY="replace-with-your-key"
-IMAGE_MODEL="gpt-image-2"
+IMAGE_MODEL="gpt-image-2.5"
 IMAGE_SIZE="auto"
 TIMEOUT_MS="300000"
 ```
@@ -141,7 +141,7 @@ TIMEOUT_MS="300000"
 
 ```json
 {
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5",
   "prompt": "A photorealistic kitten with warm rim light",
   "size": "1024x1024",
   "n": 1
@@ -172,7 +172,7 @@ TIMEOUT_MS="300000"
 
 | 字段 | 说明 |
 | --- | --- |
-| `model` | 默认 `gpt-image-2` |
+| `model` | 默认 `gpt-image-2.5` |
 | `prompt` | 编辑要求和必须保持不变的内容 |
 | `image` / `image[]` | 一张或多张输入图片 |
 | `mask` | 可选 PNG 蒙版，需包含透明信息且尺寸与第一张输入图片一致 |
@@ -200,6 +200,25 @@ node scripts/configure.mjs
 
 ```bash
 node scripts/configure.mjs --no-open
+```
+
+也可以通过标准输入直接写入配置（适合用户已经在消息中给出 Base URL 和 API Key 的场景）：
+
+```bash
+printf '%s' '{"baseUrl":"https://api.example.com/v1","apiKey":"<key>","model":"gpt-image-2.5"}' \
+  | node scripts/configure.mjs --stdin-json
+```
+
+### 列出上游模型
+
+```bash
+node scripts/models.mjs --json
+```
+
+通过 OpenAI 兼容的 `GET {base}/models` 拉取上游可用模型，并显示当前默认模型。校验后切换默认模型：
+
+```bash
+node scripts/models.mjs --set gpt-image-2.5
 ```
 
 ### 生成图片
@@ -295,6 +314,7 @@ my-image/
 │   ├── configure.mjs
 │   ├── edit.mjs
 │   ├── generate.mjs
+│   ├── models.mjs
 │   └── verify-config.mjs
 └── tests/
     └── my-image.test.mjs

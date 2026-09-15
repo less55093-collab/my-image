@@ -163,7 +163,7 @@ async function main() {
     }
   }
 
-  const model = options.model || status.config.model || "gpt-image-2";
+  const model = options.model || status.config.model || "gpt-image-2.5";
   const sizeSelection = selectEditSize(options.size, images[0], model);
   const timeoutMs = options.timeoutMs || status.config.timeoutMs;
   const outputDir = resolve(options.outputDir || "outputs/my-image");

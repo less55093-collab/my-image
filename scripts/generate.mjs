@@ -60,7 +60,7 @@ function validateGptImage2Size(width, height) {
   const pixels = width * height;
   if (longEdge > 3840) throw new Error("图片最长边不能超过 3840px");
   if (longEdge / shortEdge > 3) throw new Error("图片长宽比不能超过 3:1");
-  if (pixels < 655_360 || pixels > 8_294_400) throw new Error("图片总像素超出 gpt-image-2 支持范围");
+  if (pixels < 655_360 || pixels > 8_294_400) throw new Error("图片总像素超出 gpt-image-2 系列支持范围");
 }
 
 function normalizeExplicitSize(value, model) {
@@ -70,7 +70,7 @@ function normalizeExplicitSize(value, model) {
   let height = Number(match[2]);
   const original = `${width}x${height}`;
 
-  if (model === "gpt-image-2") {
+  if (model.startsWith("gpt-image-2")) {
     width = nearest16(width);
     height = nearest16(height);
     validateGptImage2Size(width, height);
@@ -86,7 +86,7 @@ function includesAny(text, terms) {
   return terms.some((term) => text.includes(term));
 }
 
-export function inferSize(prompt, model = "gpt-image-2") {
+export function inferSize(prompt, model = "gpt-image-2.5") {
   const text = prompt.toLowerCase();
   const explicit = text.match(/\b(\d{3,4})\s*[x×*]\s*(\d{3,4})\b/i);
   if (explicit) return normalizeExplicitSize(`${explicit[1]}x${explicit[2]}`, model);
@@ -337,7 +337,7 @@ async function main() {
     throw error;
   }
 
-  const model = options.model || status.config.model || "gpt-image-2";
+  const model = options.model || status.config.model || "gpt-image-2.5";
   const sizeSelection = options.size && options.size !== "auto"
     ? normalizeExplicitSize(options.size, model)
     : inferSize(prompt, model);
