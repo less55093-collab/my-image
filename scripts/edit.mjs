@@ -4,7 +4,8 @@ import { mkdir, readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { detectImageInfo, inferSize, sanitize, saveImageItem, timestamp } from "./generate.mjs";
-import { editEndpoint, loadConfig } from "./verify-config.mjs";
+import { loadConfig } from "./verify-config.mjs";
+import { asyncEndpoint, callAsyncImageApi, callSyncImageApi, ImageApiError, isAsyncUnsupported, syncEndpoint } from "./async-image-api.mjs";
 
 const MAX_IMAGES = 16;
 const MAX_OUTPUTS = 10;
@@ -117,26 +118,44 @@ function buildForm({ model, prompt, size, quality, count, images, mask }) {
 }
 
 async function callEditApi(context) {
-  const response = await fetch(context.endpoint, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${context.apiKey}` },
-    body: buildForm(context),
-    signal: AbortSignal.timeout(context.timeoutMs),
-  });
-  const raw = await response.text();
-  let body;
+  const useAsync = context.mode !== "sync" && context.transport.mode !== "sync";
   try {
-    body = JSON.parse(raw);
-  } catch {
-    body = { raw };
-  }
-  if (!response.ok) {
-    const error = new Error(`图片编辑接口返回 HTTP ${response.status}`);
-    error.status = response.status;
-    error.body = body;
+    if (useAsync) {
+      const body = await callAsyncImageApi({
+        endpoint: context.endpoint,
+        baseUrl: context.baseUrl,
+        apiKey: context.apiKey,
+        form: buildForm(context),
+        timeoutMs: context.timeoutMs,
+      });
+      context.transport.mode = "async";
+      return body;
+    }
+    context.transport.mode = "sync";
+    return await callSyncImageApi({
+      endpoint: syncEndpoint(context.baseUrl, "edit"),
+      apiKey: context.apiKey,
+      form: buildForm(context),
+      timeoutMs: context.timeoutMs,
+    });
+  } catch (error) {
+    if (useAsync && context.mode === "auto" && isAsyncUnsupported(error)) {
+      context.transport.mode = "sync";
+      return callSyncImageApi({
+        endpoint: syncEndpoint(context.baseUrl, "edit"),
+        apiKey: context.apiKey,
+        form: buildForm(context),
+        timeoutMs: context.timeoutMs,
+      });
+    }
+    if (error instanceof ImageApiError) {
+      const wrapped = new Error(`图片编辑接口返回 HTTP ${error.status}`);
+      wrapped.status = error.status;
+      wrapped.body = error.body;
+      throw wrapped;
+    }
     throw error;
   }
-  return body;
 }
 
 async function main() {
@@ -167,9 +186,13 @@ async function main() {
   const sizeSelection = selectEditSize(options.size, images[0], model);
   const timeoutMs = options.timeoutMs || status.config.timeoutMs;
   const outputDir = resolve(options.outputDir || "outputs/my-image");
-  const endpoint = editEndpoint(status.config.baseUrl);
+  const mode = status.config.mode || "auto";
+  const endpoint = mode === "sync"
+    ? syncEndpoint(status.config.baseUrl, "edit")
+    : asyncEndpoint(status.config.baseUrl, "edit");
   const preview = {
     endpoint,
+    mode,
     model,
     prompt,
     size: sizeSelection.size,
@@ -187,9 +210,13 @@ async function main() {
   }
 
   await mkdir(outputDir, { recursive: true });
+  const transport = { mode: mode === "sync" ? "sync" : "async" };
   try {
     const body = await callEditApi({
       endpoint,
+      mode,
+      transport,
+      baseUrl: status.config.baseUrl,
       apiKey: status.config.apiKey,
       model,
       prompt,
@@ -227,6 +254,7 @@ async function main() {
     const summary = {
       ok: results.length === options.count,
       operation: "edit",
+      transport: transport.mode,
       model,
       requestedSize: sizeSelection.size,
       sizeReason: sizeSelection.reason,

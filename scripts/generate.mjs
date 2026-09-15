@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import { loadConfig } from "./verify-config.mjs";
+import { asyncEndpoint, callAsyncImageApi, callSyncImageApi, ImageApiError, isAsyncUnsupported, syncEndpoint } from "./async-image-api.mjs";
 
 const MAX_COUNT = 10;
 const MAX_CONCURRENCY = 4;
@@ -208,13 +209,7 @@ async function imageBytes(item, endpoint, timeoutMs) {
   throw new Error("响应中没有 data[0].b64_json 或 data[0].url");
 }
 
-class ApiError extends Error {
-  constructor(status, body) {
-    super(`生图接口返回 HTTP ${status}`);
-    this.status = status;
-    this.body = body;
-  }
-}
+class ApiError extends ImageApiError {}
 
 function isSizeError(error) {
   return error instanceof ApiError
@@ -234,29 +229,33 @@ export function sanitize(value, apiKey) {
   return text.replaceAll(apiKey, "[REDACTED]").slice(0, 4_000);
 }
 
-async function callApi({ endpoint, apiKey, model, prompt, size, quality, timeoutMs }) {
+async function callApi({ endpoint, baseUrl, apiKey, model, prompt, size, quality, timeoutMs, mode, operation, transport }) {
   const payload = { model, prompt, size, n: 1 };
   if (quality && quality !== "auto") payload.quality = quality;
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-
-  const raw = await response.text();
-  let body;
+  const useAsync = mode !== "sync" && transport.mode !== "sync";
   try {
-    body = JSON.parse(raw);
-  } catch {
-    body = { raw };
+    if (useAsync) {
+      const body = await callAsyncImageApi({ endpoint, baseUrl, apiKey, json: payload, timeoutMs });
+      transport.mode = "async";
+      return body;
+    }
+    transport.mode = "sync";
+    return await callSyncImageApi({
+      endpoint: syncEndpoint(baseUrl, operation),
+      apiKey, json: payload, timeoutMs,
+    });
+  } catch (error) {
+    // auto 模式下提交阶段确认不支持异步时，整个批次改用同步重试。
+    if (useAsync && mode === "auto" && isAsyncUnsupported(error)) {
+      transport.mode = "sync";
+      return callSyncImageApi({
+        endpoint: syncEndpoint(baseUrl, operation),
+        apiKey, json: payload, timeoutMs,
+      });
+    }
+    if (error instanceof ImageApiError) throw new ApiError(error.status, error.body);
+    throw error;
   }
-  if (!response.ok) throw new ApiError(response.status, body);
-  return body;
 }
 
 export function timestamp() {
@@ -344,8 +343,13 @@ async function main() {
   const timeoutMs = options.timeoutMs || status.config.timeoutMs;
   const outputDir = resolve(options.outputDir || "outputs/my-image");
   const concurrency = Math.min(options.concurrency, options.count);
+  const mode = status.config.mode || "auto";
+  const endpoint = mode === "sync"
+    ? syncEndpoint(status.config.baseUrl, "generate")
+    : asyncEndpoint(status.config.baseUrl, "generate");
   const payloadPreview = {
-    endpoint: status.config.endpoint,
+    endpoint,
+    mode,
     model,
     prompt,
     size: sizeSelection.size,
@@ -363,8 +367,12 @@ async function main() {
 
   await mkdir(outputDir, { recursive: true });
   const context = {
-    endpoint: status.config.endpoint,
+    endpoint,
+    baseUrl: status.config.baseUrl,
     apiKey: status.config.apiKey,
+    mode,
+    operation: "generate",
+    transport: { mode: mode === "sync" ? "sync" : "async" },
     model,
     prompt,
     size: sizeSelection.size,
@@ -387,6 +395,7 @@ async function main() {
   const succeeded = results.filter((item) => item.ok).length;
   const summary = {
     ok: succeeded === options.count,
+    transport: context.transport.mode,
     model,
     requestedSize: sizeSelection.size,
     sizeReason: sizeSelection.reason,

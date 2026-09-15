@@ -160,10 +160,13 @@ export async function loadConfig(options = {}) {
   const rawBaseUrl = firstValue(env, fileValues, "OPENAI_BASE_URL");
   const model = firstValue(env, fileValues, "IMAGE_MODEL", DEFAULT_MODEL);
   const defaultSize = firstValue(env, fileValues, "IMAGE_SIZE", "auto");
+  const rawMode = firstValue(env, fileValues, "IMAGE_MODE", "auto");
   const timeoutMs = positiveInteger(
     firstValue(env, fileValues, "TIMEOUT_MS", String(DEFAULT_TIMEOUT_MS)),
     DEFAULT_TIMEOUT_MS,
   );
+
+  const mode = normalizeImageMode(rawMode, warnings);
 
   const missing = [];
   if (!apiKey) missing.push("OPENAI_API_KEY");
@@ -203,8 +206,16 @@ export async function loadConfig(options = {}) {
       model,
       defaultSize,
       timeoutMs,
+      mode,
     },
   };
+}
+
+export function normalizeImageMode(value, warnings) {
+  const mode = String(value || "auto").trim().toLowerCase();
+  if (["auto", "async", "sync"].includes(mode)) return mode;
+  if (Array.isArray(warnings)) warnings.push(`IMAGE_MODE 仅支持 auto/async/sync，已按 auto 处理: ${value}`);
+  return "auto";
 }
 
 function envLine(key, value) {
@@ -227,6 +238,7 @@ export async function saveConfig(values, options = {}) {
     envLine("OPENAI_API_KEY", apiKey),
     envLine("IMAGE_MODEL", model),
     envLine("IMAGE_SIZE", values.defaultSize || "auto"),
+    envLine("IMAGE_MODE", values.mode || "auto"),
     envLine("TIMEOUT_MS", values.timeoutMs || DEFAULT_TIMEOUT_MS),
     "",
   ].join("\n");
@@ -264,6 +276,7 @@ function publicStatus(status) {
       model: status.config.model,
       defaultSize: status.config.defaultSize,
       timeoutMs: status.config.timeoutMs,
+      mode: status.config.mode,
     },
   };
 }

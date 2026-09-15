@@ -5,7 +5,13 @@ description: Generate, edit, and display images through a user-supplied OpenAI-c
 
 # My Image
 
-通过用户的 OpenAI 兼容接口（`/images/generations`、`/images/edits`、`/models`）生成或编辑图片。
+通过用户的 OpenAI 兼容接口生成或编辑图片。请求模式由 `IMAGE_MODE` 配置决定：
+
+- `auto`（默认）：优先走异步端点（`/images/generations/async`、`/images/edits/async` + 轮询 `/images/tasks/:id`），网关会把图片转存到对象存储（如 R2）；如果中转站不支持异步（提交返回 404/405/501），自动降级为同步端点。
+- `async`：只用异步，失败不降级。
+- `sync`：只用同步端点（`/images/generations`、`/images/edits`），兼容性最好。
+
+配置方式：环境变量或在 configure 的 stdin JSON / 配置文件中加 `"mode": "sync"` 等。脚本输出 JSON 中的 `transport` 字段标明本次实际走了 `async` 还是 `sync`。
 
 ## 快速上手（agent 按此顺序执行）
 
@@ -24,7 +30,7 @@ node <skill-dir>/scripts/verify-config.mjs --json
 - 用户已经在消息里同时给出 Base URL 和 API Key 时，直接用 stdin 写入（**不要把 key 放进命令行参数、文件或回显输出**）：
 
   ```bash
-  printf '%s' '{"baseUrl":"<base-url>","apiKey":"<api-key>","model":"gpt-image-2.5"}' \
+  printf '%s' '{"baseUrl":"<base-url>","apiKey":"<api-key>","model":"gpt-image-2.5","mode":"auto"}' \
     | node <skill-dir>/scripts/configure.mjs --stdin-json
   ```
 

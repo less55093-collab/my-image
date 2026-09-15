@@ -128,6 +128,7 @@ async function testBrowserSetup(root) {
 
 async function startMockApi() {
   const requests = { generation: [], edit: [] };
+  const tasks = new Map();
   const server = createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -140,6 +141,57 @@ async function startMockApi() {
     if (request.method === "GET" && request.url === "/image.png") {
       response.writeHead(200, { "Content-Type": "image/png" });
       response.end(png);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/images/generations/async") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const body = JSON.parse(raw);
+      requests.generation.push({ ...body, asyncSubmit: true });
+
+      if (body.prompt.includes("auth-mode")) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: `bad key ${fakeKey}` } }));
+        return;
+      }
+      if (body.prompt.includes("fallback-mode") && body.size !== "1536x1024") {
+        response.writeHead(400, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "unsupported image size" } }));
+        return;
+      }
+      tasks.set("task_gen", body);
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ task_id: "task_gen", status: "pending" }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/images/edits/async") {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const raw = Buffer.concat(chunks).toString("latin1");
+      requests.edit.push({ contentType: request.headers["content-type"], raw, asyncSubmit: true });
+      if (raw.includes("auth-edit-mode")) {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: `bad key ${fakeKey}` } }));
+        return;
+      }
+      tasks.set("task_edit", raw);
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ task_id: "task_edit", status: "pending" }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/images/tasks/task_gen") {
+      const body = tasks.get("task_gen") || {};
+      const address = server.address();
+      const item = String(body.prompt || "").includes("url-mode")
+        ? { url: `http://127.0.0.1:${address.port}/image.png` }
+        : { b64_json: png.toString("base64") };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ id: "task_gen", status: "completed", result: { data: [item] } }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/images/tasks/task_edit") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ id: "task_edit", status: "completed", result: { data: [{ b64_json: png.toString("base64") }] } }));
       return;
     }
     if (request.method === "POST" && request.url === "/v1/images/edits") {
@@ -258,6 +310,7 @@ async function testGeneration(root) {
     assert(!authResult.stdout.includes(fakeKey), "generation output leaked API key");
     assert.equal(JSON.parse(authResult.stdout).results[0].code, "AUTH_FAILED");
     assert(api.requests.generation.every((item) => item.model === "gpt-image-2.5"));
+    assert(api.requests.generation.every((item) => item.asyncSubmit), "generation should use async submit in auto mode");
 
     assert.equal(modelsEndpoint(api.baseUrl), `${api.baseUrl}/models`);
     assert.equal(modelsEndpoint(`${api.baseUrl}/images/generations`), `${api.baseUrl}/models`);
@@ -346,11 +399,72 @@ async function testGeneration(root) {
   }
 }
 
+async function startSyncOnlyApi() {
+  const server = createServer(async (request, response) => {
+    if (request.method === "POST" && request.url === "/v1/images/generations/async") {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/images/generations") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const body = JSON.parse(raw);
+      if (body.prompt.includes("async-forced")) {
+        response.writeHead(500).end();
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise((resolveClose) => server.close(resolveClose)),
+  };
+}
+
+async function testSyncFallback(root) {
+  const api = await startSyncOnlyApi();
+  try {
+    const configPath = join(root, "sync-fallback-config", ".env");
+    const outputDir = join(root, "sync-outputs");
+    await configureViaStdin(configPath, api.baseUrl);
+
+    // auto 模式：异步 404 后应自动降级同步并成功出图
+    const autoResult = await run(
+      "node",
+      [generateScript, "--prompt", "sync-only 方形头像", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+    );
+    assert.equal(autoResult.code, 0, autoResult.stderr);
+    const autoSummary = JSON.parse(autoResult.stdout);
+    assert.equal(autoSummary.transport, "sync");
+    assert.equal(autoSummary.succeeded, 1);
+
+    // 显式 async 模式：不支持异步时应直接失败而不是降级
+    const asyncOnlyResult = await run(
+      "node",
+      [generateScript, "--prompt", "async-forced 方形头像", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath, IMAGE_MODE: "async" } },
+    );
+    assert.equal(asyncOnlyResult.code, 1);
+    assert.equal(JSON.parse(asyncOnlyResult.stdout).results[0].status, 404);
+  } finally {
+    await api.close();
+  }
+}
+
 const root = await mkdtemp(join(tmpdir(), "my-image-test-"));
 try {
   await testConfigFile(root);
   await testBrowserSetup(root);
   await testGeneration(root);
+  await testSyncFallback(root);
   console.log("my-image tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });

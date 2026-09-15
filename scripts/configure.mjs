@@ -48,6 +48,7 @@ async function save(values) {
     apiKey: values.apiKey ?? values.OPENAI_API_KEY,
     model: values.model ?? values.IMAGE_MODEL ?? "gpt-image-2.5",
     defaultSize: values.defaultSize ?? values.IMAGE_SIZE ?? "auto",
+    mode: values.mode ?? values.IMAGE_MODE ?? "auto",
     timeoutMs: values.timeoutMs ?? values.TIMEOUT_MS ?? 300_000,
   });
   return { ...result, warnings: applyWindowsAcl(result.configPath) };
