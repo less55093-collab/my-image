@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectImageInfo, inferSize } from "../scripts/generate.mjs";
-import { editEndpoint, modelsEndpoint, normalizeBaseUrl } from "../scripts/verify-config.mjs";
+import { editEndpoint, modelsEndpoint, normalizeBaseUrl, probeConnection } from "../scripts/verify-config.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configureScript = join(repoRoot, "scripts", "configure.mjs");
@@ -124,6 +124,123 @@ async function testBrowserSetup(root) {
   const code = await new Promise((resolveCode) => child.once("close", resolveCode));
   assert.equal(code, 0, stderr);
   assert(!stdout.includes(fakeKey), "browser setup output leaked API key");
+}
+
+async function startSetupServer(configPath) {
+  const child = spawn("node", [configureScript, "--no-open", "--timeout-ms", "10000"], {
+    cwd: repoRoot,
+    env: { ...process.env, MY_IMAGE_GEN_ENV_FILE: configPath },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  const setupUrl = await new Promise((resolveUrl, rejectUrl) => {
+    const timer = setTimeout(() => rejectUrl(new Error("setup URL timeout")), 5_000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      const match = stdout.match(/MY_IMAGE_SETUP_URL=(http:\/\/[^\s]+)/);
+      if (!match) return;
+      clearTimeout(timer);
+      resolveUrl(match[1]);
+    });
+    child.once("error", rejectUrl);
+  });
+  const parsed = new URL(setupUrl);
+  const token = encodeURIComponent(parsed.searchParams.get("token"));
+  const post = (path, body) => fetch(`${parsed.origin}${path}?token=${token}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { child, setupUrl, post, output: () => stdout };
+}
+
+async function testSetupModelPicker(root, api) {
+  const configPath = join(root, "picker-config", ".env");
+  await configureViaStdin(configPath, api.baseUrl);
+  const setup = await startSetupServer(configPath);
+  try {
+    const page = await (await fetch(setup.setupUrl)).text();
+    assert(page.includes("获取模型"));
+    assert(page.includes(api.baseUrl), "setup page should prefill saved Base URL");
+    assert(!page.includes(fakeKey), "setup page leaked API key");
+
+    const listed = await setup.post("/models", { baseUrl: api.baseUrl, apiKey: "" });
+    assert.equal(listed.status, 200, await listed.clone().text());
+    const models = await listed.json();
+    assert.equal(models.count, 2);
+    assert.deepEqual(models.image, ["gpt-image-2", "gpt-image-2.5"]);
+
+    const otherHost = await setup.post("/models", { baseUrl: "https://other.example/v1", apiKey: "" });
+    assert.equal(otherHost.status, 400);
+
+    const saved = await setup.post("/save", { baseUrl: api.baseUrl, apiKey: "", model: "gpt-image-2" });
+    assert.equal(saved.status, 200, await saved.text());
+    await new Promise((resolveClose) => setup.child.once("close", resolveClose));
+    assert(!setup.output().includes(fakeKey), "setup output leaked API key");
+    const content = await readFile(configPath, "utf8");
+    assert(content.includes(fakeKey), "saved key should be reused when left blank");
+    assert(content.includes('IMAGE_MODEL="gpt-image-2"'));
+  } finally {
+    setup.child.kill();
+  }
+}
+
+async function testConnectionProbe(root) {
+  // 网关根路径返回网页，只有 /v1/models 是真实接口，且没有默认模型。
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== `Bearer ${fakeKey}`) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "bad key" } }));
+      return;
+    }
+    if (request.url === "/v1/models") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "chat-model" }, { id: "flux-pro" }] }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/html" });
+    response.end("<html>console</html>");
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const fixed = await probeConnection({ baseUrl: base, apiKey: fakeKey, model: "gpt-image-2.5" });
+    assert.equal(fixed.verified, true);
+    assert.equal(fixed.baseUrl, `${base}/v1`);
+    assert.equal(fixed.model, "flux-pro");
+    assert.equal(fixed.changed, true);
+
+    const custom = await probeConnection({ baseUrl: base, apiKey: fakeKey, model: "my-custom" });
+    assert.equal(custom.model, "my-custom");
+    assert.equal(custom.unlisted, true);
+
+    await assert.rejects(
+      probeConnection({ baseUrl: base, apiKey: "wrong", model: "gpt-image-2.5" }),
+      (error) => error.code === "AUTH_FAILED",
+    );
+
+    const configPath = join(root, "probe-config", ".env");
+    const saved = await run("node", [configureScript, "--stdin-json"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: configPath },
+      stdin: JSON.stringify({ baseUrl: base, apiKey: fakeKey }),
+    });
+    assert.equal(saved.code, 0, saved.stderr);
+    assert(!saved.stdout.includes(fakeKey), "configure output leaked API key");
+    const summary = JSON.parse(saved.stdout);
+    assert.equal(summary.verified, true);
+    assert.equal(summary.baseUrl, `${base}/v1`);
+    assert.equal(summary.model, "flux-pro");
+
+    const rejectedPath = join(root, "probe-rejected", ".env");
+    const rejected = await run("node", [configureScript, "--stdin-json"], {
+      env: { MY_IMAGE_GEN_ENV_FILE: rejectedPath },
+      stdin: JSON.stringify({ baseUrl: base, apiKey: "wrong" }),
+    });
+    assert.equal(rejected.code, 1);
+    await assert.rejects(stat(rejectedPath), "auth failure must not write config");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+  }
 }
 
 async function startMockApi() {
@@ -255,6 +372,7 @@ async function testGeneration(root) {
     const configPath = join(root, "api-config", ".env");
     const outputDir = join(root, "outputs");
     await configureViaStdin(configPath, api.baseUrl);
+    await testSetupModelPicker(root, api);
 
     assert.equal(inferSize("网站首屏横幅，现代产品展示").size, "2048x1152");
     assert.equal(inferSize("手机壁纸，竖屏 9:16").size, "1152x2048");
@@ -463,6 +581,7 @@ const root = await mkdtemp(join(tmpdir(), "my-image-test-"));
 try {
   await testConfigFile(root);
   await testBrowserSetup(root);
+  await testConnectionProbe(root);
   await testGeneration(root);
   await testSyncFallback(root);
   console.log("my-image tests passed");

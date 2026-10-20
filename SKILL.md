@@ -34,7 +34,11 @@ node <skill-dir>/scripts/verify-config.mjs --json
     | node <skill-dir>/scripts/configure.mjs --stdin-json
   ```
 
-- 用户没给全时，运行 `node <skill-dir>/scripts/configure.mjs`，它会打开本地浏览器表单。把输出的 `MY_IMAGE_SETUP_URL` 转达给用户，等待 `MY_IMAGE_CONFIG_SAVED`。
+- 用户没给全时，运行 `node <skill-dir>/scripts/configure.mjs`，它会打开本地浏览器表单（会预填已保存的 Base URL 和模型；API Key 留空则沿用旧 Key，但仅限 Base URL 未变）。表单里的「获取模型」按钮会从上游 `/models` 拉取列表并验证连接，图像模型排在前面。把输出的 `MY_IMAGE_SETUP_URL` 转达给用户，等待 `MY_IMAGE_CONFIG_SAVED`。
+
+保存前会自动验证连接：请求上游 `/models`，失败且地址没有 `/v1` 时会补上 `/v1` 再试；如果上游没有默认模型，会改用第一个图像模型。Key 无效（401/403）时直接报错，不会保存。其他验证失败（例如网关没实现 `/models`）仍会保存，并给出提示。结果在 stdin 模式的 JSON（`verified`、`baseUrl`、`model`、`warnings`）里，或在表单模式的 `MY_IMAGE_CONFIG_VERIFIED`、`MY_IMAGE_BASE_URL`、`MY_IMAGE_MODEL`、`MY_IMAGE_WARNING` 输出行里。把修正后的地址和模型告诉用户。确实需要离线保存时，可以加 `--skip-verify`。
+
+不要主动让用户把 API Key 发在对话里，优先用浏览器表单；用户已经发了的话，再走 stdin 写入。
 
 配置写入后重新执行第 1 步确认 `ok: true`。配置文件位置：`${XDG_CONFIG_HOME:-~/.config}/my-image/.env`（Windows: `%APPDATA%\my-image\.env`），可用 `MY_IMAGE_GEN_ENV_FILE` 覆盖。
 
@@ -72,7 +76,7 @@ node <skill-dir>/scripts/models.mjs --json     # JSON，agent 优先用这个
 node <skill-dir>/scripts/models.mjs --set gpt-image-2.5   # 校验存在后写回配置，设为默认模型
 ```
 
-何时使用：用户问「有哪些模型」「换个模型」「当前用的什么模型」，或默认模型报 `model not found` 类错误需要挑选替代模型时。`--set` 只会接受上游列表中真实存在的模型。
+何时使用：用户问「有哪些模型」「换个模型」「当前用的什么模型」，或默认模型报 `model not found` 类错误需要挑选替代模型时。`--set` 只会接受上游列表中真实存在的模型。JSON 中的 `imageModels` 是按名称推测的图像模型，推荐模型时优先从中挑选。用户更习惯点选时，也可以重新运行 `configure.mjs`，让用户在配置页里点「获取模型」选择。
 
 ## 参数规则
 

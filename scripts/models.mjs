@@ -8,7 +8,7 @@
 
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { fetchModels, loadConfig, saveConfig } from "./verify-config.mjs";
+import { fetchModels, loadConfig, saveConfig, sortModelsForImages } from "./verify-config.mjs";
 
 function parseArgs(argv) {
   const options = { json: false, set: "" };
@@ -51,6 +51,7 @@ async function main() {
     currentModel: status.config.model,
     count: result.models.length,
     models: result.models,
+    imageModels: sortModelsForImages(result.models).image,
   };
 
   if (options.set) {
@@ -66,6 +67,9 @@ async function main() {
       baseUrl: status.config.baseUrl,
       apiKey: status.config.apiKey,
       model: options.set,
+      defaultSize: status.config.defaultSize,
+      mode: status.config.mode,
+      timeoutMs: status.config.timeoutMs,
     });
     summary.saved = { configPath: saved.configPath, model: saved.model };
     summary.currentModel = saved.model;
@@ -76,7 +80,8 @@ async function main() {
   } else {
     console.log(`接口: ${summary.endpoint}`);
     console.log(`当前默认模型: ${summary.currentModel}`);
-    for (const model of result.models) console.log(`- ${model}`);
+    const marked = new Set(summary.imageModels);
+    for (const model of result.models) console.log(`- ${model}${marked.has(model) ? "  [图像]" : ""}`);
     if (summary.saved) console.log(`已保存默认模型: ${summary.saved.model}`);
   }
 }

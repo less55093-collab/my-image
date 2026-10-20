@@ -130,11 +130,63 @@ export async function fetchModels({ baseUrl, apiKey, timeoutMs = 30_000 }) {
     error.status = response.status;
     throw error;
   }
-  const items = Array.isArray(body?.data) ? body.data : [];
+  // 填错路径时，不少网关会返回 200 的网页而不是模型列表。
+  if (!Array.isArray(body?.data)) {
+    const error = new Error(`${endpoint} 返回的不是模型列表`);
+    error.status = response.status;
+    error.code = "NOT_MODELS_LIST";
+    throw error;
+  }
+  const items = body.data;
   const models = items
     .map((item) => (typeof item === "string" ? item : item?.id))
     .filter((id) => typeof id === "string" && id.trim());
   return { endpoint, models: [...new Set(models)] };
+}
+
+const IMAGE_MODEL_PATTERN = /image|dall-?e|flux|stable-?diffusion|sdxl|midjourney|imagen|seedream|kolors|ideogram|recraft|cogview|banana/i;
+
+export function isLikelyImageModel(id) {
+  return IMAGE_MODEL_PATTERN.test(String(id || ""));
+}
+
+export function sortModelsForImages(models) {
+  const image = models.filter(isLikelyImageModel);
+  const other = models.filter((id) => !isLikelyImageModel(id));
+  return { image, other };
+}
+
+// 有的模型名不在上游列表里（比如用户自己输入的），这时保留用户的选择；
+// 只有仍是默认模型且上游没有它时，才自动换成第一个图像模型。
+export function pickModel(models, preferred) {
+  if (!models.length || models.includes(preferred)) return { model: preferred, changed: false };
+  if (preferred !== DEFAULT_MODEL) return { model: preferred, changed: false, unlisted: true };
+  const [first] = sortModelsForImages(models).image;
+  return first ? { model: first, changed: true } : { model: preferred, changed: false, unlisted: true };
+}
+
+// 保存前检查连接：请求 /models，失败时如果地址没有 /v1，就自动补上再试一次。
+// 鉴权失败直接抛出；其他失败（比如网关没实现 /models）只返回 verified: false，不阻止保存。
+export async function probeConnection({ baseUrl, apiKey, model, timeoutMs = 30_000 }) {
+  const candidates = [baseUrl];
+  if (!/\/v\d+$/.test(baseUrl) && !/\/images\/(?:generations|edits)$/.test(baseUrl)) candidates.push(`${baseUrl}/v1`);
+
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      const { models } = await fetchModels({ baseUrl: candidate, apiKey, timeoutMs });
+      return { verified: true, baseUrl: candidate, models, ...pickModel(models, model) };
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) {
+        const authError = new Error("API Key 无效或无权限");
+        authError.code = "AUTH_FAILED";
+        authError.status = error.status;
+        throw authError;
+      }
+      lastError = error;
+    }
+  }
+  return { verified: false, baseUrl, model, models: [], changed: false, error: lastError?.message || "无法连接上游" };
 }
 
 function positiveInteger(value, fallback) {

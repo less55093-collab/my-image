@@ -6,14 +6,15 @@ import { createServer } from "node:http";
 import { platform } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getConfigPath, saveConfig } from "./verify-config.mjs";
+import { fetchModels, getConfigPath, loadConfig, normalizeBaseUrl, probeConnection, saveConfig, sortModelsForImages } from "./verify-config.mjs";
 
 function parseArgs(argv) {
-  const options = { noOpen: false, stdinJson: false, timeoutMs: 600_000 };
+  const options = { noOpen: false, stdinJson: false, skipVerify: false, timeoutMs: 600_000 };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--no-open") options.noOpen = true;
     else if (arg === "--stdin-json") options.stdinJson = true;
+    else if (arg === "--skip-verify") options.skipVerify = true;
     else if (arg === "--timeout-ms") options.timeoutMs = Number(argv[++index]);
     else throw new Error(`未知参数: ${arg}`);
   }
@@ -42,16 +43,47 @@ function applyWindowsAcl(configPath) {
   return result.status === 0 ? [] : ["无法自动收紧 Windows 配置文件 ACL"];
 }
 
-async function save(values) {
+async function save(values, { skipVerify = false } = {}) {
+  let baseUrl = normalizeBaseUrl(values.baseUrl ?? values.OPENAI_BASE_URL);
+  const apiKey = String(values.apiKey ?? values.OPENAI_API_KEY ?? "").trim();
+  let model = String(values.model ?? values.IMAGE_MODEL ?? "").trim() || "gpt-image-2.5";
+  if (!apiKey) throw new Error("API Key 不能为空");
+
+  let verification = { verified: false, skipped: true };
+  if (!skipVerify) {
+    verification = await probeConnection({ baseUrl, apiKey, model });
+    baseUrl = verification.baseUrl;
+    model = verification.model;
+  }
+
   const result = await saveConfig({
-    baseUrl: values.baseUrl ?? values.OPENAI_BASE_URL,
-    apiKey: values.apiKey ?? values.OPENAI_API_KEY,
-    model: values.model ?? values.IMAGE_MODEL ?? "gpt-image-2.5",
+    baseUrl,
+    apiKey,
+    model,
     defaultSize: values.defaultSize ?? values.IMAGE_SIZE ?? "auto",
     mode: values.mode ?? values.IMAGE_MODE ?? "auto",
     timeoutMs: values.timeoutMs ?? values.TIMEOUT_MS ?? 300_000,
   });
-  return { ...result, warnings: applyWindowsAcl(result.configPath) };
+  return { ...result, verification, warnings: [...verificationWarnings(values, verification), ...applyWindowsAcl(result.configPath)] };
+}
+
+function verificationWarnings(values, verification) {
+  if (verification.skipped) return [];
+  if (!verification.verified) return [`未能验证连接（${verification.error}），已按填写内容保存`];
+  const warnings = [];
+  const typedBaseUrl = normalizeBaseUrl(values.baseUrl ?? values.OPENAI_BASE_URL);
+  if (verification.baseUrl !== typedBaseUrl) warnings.push(`Base URL 已自动修正为 ${verification.baseUrl}`);
+  if (verification.changed) warnings.push(`上游没有默认模型，已改用 ${verification.model}`);
+  if (verification.unlisted) warnings.push(`上游模型列表中没有 ${verification.model}，已按填写内容保存`);
+  return warnings;
+}
+
+function printSaved(result) {
+  console.log(`MY_IMAGE_CONFIG_SAVED=${result.configPath}`);
+  console.log(`MY_IMAGE_CONFIG_VERIFIED=${result.verification.verified ? "1" : "0"}`);
+  console.log(`MY_IMAGE_BASE_URL=${result.baseUrl}`);
+  console.log(`MY_IMAGE_MODEL=${result.model}`);
+  for (const warning of result.warnings) console.log(`MY_IMAGE_WARNING=${warning}`);
 }
 
 function openBrowser(url) {
@@ -73,7 +105,7 @@ function openBrowser(url) {
   }
 }
 
-function htmlPage(token, configPath, nonce) {
+function htmlPage(token, configPath, nonce, existing) {
   const safePath = configPath.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return `<!doctype html>
 <html lang="zh-CN">
@@ -101,6 +133,12 @@ function htmlPage(token, configPath, nonce) {
     #status { min-height: 24px; margin-top: 15px; font-size: 14px; }
     #status.error { color: var(--error); }
     #status.success { color: var(--accent); font-weight: 650; }
+    .model-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .secondary { min-height: 46px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 6px; background: #fff; color: var(--accent); font: 650 14px/1 inherit; cursor: pointer; white-space: nowrap; }
+    .secondary:hover { background: var(--paper); }
+    select { width: 100%; min-height: 42px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); font: inherit; }
+    select[hidden] { display: none; }
+    #models-status.error { color: var(--error); }
   </style>
 </head>
 <body>
@@ -109,16 +147,21 @@ function htmlPage(token, configPath, nonce) {
     <p>填写两项即可开始生图。模型已默认设为 gpt-image-2.5，可按需修改。</p>
     <form id="setup-form">
       <label for="base-url">Base URL</label>
-      <input id="base-url" name="baseUrl" type="url" required autofocus placeholder="https://example.com/v1" autocomplete="url">
+      <input id="base-url" name="baseUrl" type="url" required autofocus placeholder="https://example.com/v1" autocomplete="url" value="${escapeHtml(existing.baseUrl)}">
 
       <label for="api-key">API Key</label>
       <div class="key-row">
-        <input id="api-key" name="apiKey" type="password" required autocomplete="new-password" spellcheck="false">
+        <input id="api-key" name="apiKey" type="password" ${existing.hasApiKey ? 'placeholder="已保存，留空则沿用原 Key"' : "required"} autocomplete="new-password" spellcheck="false">
         <button class="icon-button" id="toggle-key" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key">◉</button>
       </div>
 
       <label for="model">模型</label>
-      <input id="model" name="model" value="gpt-image-2.5" spellcheck="false">
+      <div class="model-row">
+        <input id="model" name="model" value="${escapeHtml(existing.model)}" spellcheck="false">
+        <button class="secondary" id="fetch-models" type="button">获取模型</button>
+      </div>
+      <select id="model-list" hidden aria-label="上游模型列表"></select>
+      <div class="hint" id="models-status">填好 Base URL 和 API Key 后，可点击「获取模型」从上游读取可用模型，同时验证连接。</div>
       <div class="hint">配置文件：${safePath}</div>
 
       <button type="submit">保存配置</button>
@@ -134,12 +177,54 @@ function htmlPage(token, configPath, nonce) {
     toggle.addEventListener('click', () => {
       keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
     });
+    const modelInput = document.querySelector('#model');
+    const modelList = document.querySelector('#model-list');
+    const modelsStatus = document.querySelector('#models-status');
+    const fetchButton = document.querySelector('#fetch-models');
+    function addGroup(label, ids) {
+      if (!ids.length) return;
+      const group = document.createElement('optgroup');
+      group.label = label;
+      for (const id of ids) group.append(new Option(id, id, false, id === modelInput.value));
+      modelList.append(group);
+    }
+    modelList.addEventListener('change', () => { modelInput.value = modelList.value; });
+    fetchButton.addEventListener('click', async () => {
+      fetchButton.disabled = true;
+      modelsStatus.className = 'hint';
+      modelsStatus.textContent = '正在获取上游模型...';
+      try {
+        const response = await fetch('/models?token=' + encodeURIComponent(token), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl: form.baseUrl.value, apiKey: keyInput.value, model: modelInput.value }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '获取失败');
+        if (result.baseUrl) form.baseUrl.value = result.baseUrl;
+        if (result.model) modelInput.value = result.model;
+        modelList.replaceChildren();
+        addGroup('图像模型', result.image);
+        addGroup('其他模型', result.other);
+        modelList.hidden = result.count === 0;
+        if (result.count && !modelList.value) modelList.selectedIndex = -1;
+        modelsStatus.textContent = result.count
+          ? '连接成功：共 ' + result.count + ' 个模型，其中疑似图像模型 ' + result.image.length + ' 个。从下拉框选择或直接输入。'
+          : '连接成功，但上游没有返回模型列表，请手动填写模型名。';
+      } catch (error) {
+        modelList.hidden = true;
+        modelsStatus.className = 'hint error';
+        modelsStatus.textContent = error.message;
+      } finally {
+        fetchButton.disabled = false;
+      }
+    });
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
       button.disabled = true;
       status.className = '';
-      status.textContent = '正在保存...';
+      status.textContent = '正在验证连接并保存...';
       try {
         const response = await fetch('/save?token=' + encodeURIComponent(token), {
           method: 'POST',
@@ -149,8 +234,12 @@ function htmlPage(token, configPath, nonce) {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || '保存失败');
         form.querySelectorAll('input, button').forEach((item) => item.disabled = true);
+        if (result.baseUrl) form.baseUrl.value = result.baseUrl;
+        if (result.model) modelInput.value = result.model;
         status.className = 'success';
-        status.textContent = '配置完成。现在可以回到 Codex 继续生图。';
+        status.textContent = (result.verified ? '连接已验证，配置完成。' : '配置已保存（未能验证连接）。')
+          + (result.warnings.length ? ' ' + result.warnings.join('；') + '。' : '')
+          + ' 现在可以回到 Codex 继续生图。';
       } catch (error) {
         button.disabled = false;
         status.className = 'error';
@@ -160,6 +249,22 @@ function htmlPage(token, configPath, nonce) {
   </script>
 </body>
 </html>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+// 表单里 API Key 留空时，只有 Base URL 与已保存的一致才沿用旧 Key，避免把 Key 发给新地址。
+function resolveApiKey(values, existing) {
+  const typed = String(values.apiKey || "").trim();
+  if (typed) return typed;
+  if (existing.apiKey && normalizeBaseUrl(values.baseUrl) === existing.baseUrl) return existing.apiKey;
+  throw new Error(existing.apiKey ? "Base URL 已变更，请重新填写 API Key" : "API Key 不能为空");
 }
 
 function securityHeaders(nonce) {
@@ -189,6 +294,13 @@ async function serveSetup(options) {
   const token = randomBytes(24).toString("hex");
   const nonce = randomBytes(18).toString("base64url");
   const configPath = getConfigPath();
+  const status = await loadConfig();
+  const existing = {
+    baseUrl: status.config.baseUrl,
+    apiKey: status.config.apiKey,
+    hasApiKey: status.config.hasApiKey,
+    model: status.config.model,
+  };
   let finished = false;
 
   const server = createServer(async (request, response) => {
@@ -202,16 +314,51 @@ async function serveSetup(options) {
 
     if (request.method === "GET" && requestUrl.pathname === "/") {
       response.writeHead(200, { ...headers, "Content-Type": "text/html; charset=utf-8" });
-      response.end(htmlPage(token, configPath, nonce));
+      response.end(htmlPage(token, configPath, nonce, existing));
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/models") {
+      try {
+        const body = await readJsonBody(request);
+        const result = await probeConnection({
+          baseUrl: normalizeBaseUrl(body.baseUrl),
+          apiKey: resolveApiKey(body, existing),
+          model: String(body.model || "").trim() || "gpt-image-2.5",
+        });
+        if (!result.verified) throw new Error(`获取失败：${result.error}`);
+        const { image, other } = sortModelsForImages(result.models);
+        response.writeHead(200, { ...headers, "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ count: result.models.length, image, other, baseUrl: result.baseUrl, model: result.model }));
+      } catch (error) {
+        const message = error.status === 401 || error.status === 403
+          ? "API Key 无效或无权限"
+          : error.status ? `上游返回错误 (${error.status})：${error.message}` : error.message;
+        response.writeHead(400, { ...headers, "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: message }));
+      }
       return;
     }
 
     if (request.method === "POST" && requestUrl.pathname === "/save") {
       try {
-        const result = await save(await readJsonBody(request));
+        const body = await readJsonBody(request);
+        const result = await save({
+          defaultSize: status.config.defaultSize,
+          mode: status.config.mode,
+          timeoutMs: status.config.timeoutMs,
+          ...body,
+          apiKey: resolveApiKey(body, existing),
+        }, { skipVerify: options.skipVerify });
         response.writeHead(200, { ...headers, "Content-Type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ ok: true, warnings: result.warnings }));
-        console.log(`MY_IMAGE_CONFIG_SAVED=${result.configPath}`);
+        response.end(JSON.stringify({
+          ok: true,
+          verified: result.verification.verified,
+          baseUrl: result.baseUrl,
+          model: result.model,
+          warnings: result.warnings,
+        }));
+        printSaved(result);
         finished = true;
         setTimeout(() => server.close(), 250);
       } catch (error) {
@@ -256,8 +403,15 @@ async function main() {
     } catch {
       throw new Error("标准输入必须是 JSON 配置");
     }
-    const result = await save(values);
-    console.log(JSON.stringify({ ok: true, configPath: result.configPath, warnings: result.warnings }, null, 2));
+    const result = await save(values, { skipVerify: options.skipVerify });
+    console.log(JSON.stringify({
+      ok: true,
+      configPath: result.configPath,
+      verified: result.verification.verified,
+      baseUrl: result.baseUrl,
+      model: result.model,
+      warnings: result.warnings,
+    }, null, 2));
     return;
   }
   await serveSetup(options);

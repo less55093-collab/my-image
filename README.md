@@ -94,7 +94,9 @@ $my-image 把第一张图中的人物放到第二张图的室内场景中，保�
 
 - `Base URL`，例如 `https://example.com/v1`
 - `API Key`
-- 模型，可不修改，默认是 `gpt-image-2.5`
+- 模型，可不修改，默认是 `gpt-image-2.5`；也可以点击「获取模型」从上游读取可用模型列表（图像模型排在前面），并顺便验证 Base URL 和 Key 是否可用
+
+再次打开配置页时，会预填已保存的 Base URL 和模型；API Key 留空即沿用原来的 Key（仅限 Base URL 没变时）。
 
 保存后，Skill 会继续执行用户原来的生图请求，不需要重新描述。
 
