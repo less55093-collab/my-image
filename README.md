@@ -14,6 +14,7 @@
 - 兼容 `data[0].b64_json` 和 `data[0].url` 两种 OpenAI 风格响应。
 - 支持 PNG、JPEG 和 WebP，并读取文件中的实际宽高。
 - 支持单图编辑、多图合成和可选 PNG 蒙版。
+- 默认直接调用同步接口，避免探测未启用的异步任务接口；可显式选择异步模式。
 - 第三方接口拒绝尺寸时，仅对明确的尺寸错误执行一次兼容降级。
 - API Key 不写入仓库，不在正常输出中回显。
 - 生成后由 Codex 检查图片，并通过绝对路径直接显示。
@@ -116,10 +117,15 @@ OPENAI_BASE_URL="https://example.com/v1"
 OPENAI_API_KEY="replace-with-your-key"
 IMAGE_MODEL="gpt-image-2.5"
 IMAGE_SIZE="auto"
+IMAGE_MODE="sync"
 TIMEOUT_MS="300000"
 ```
 
 不要把真实 `.env`、API Key 或包含凭据的截图提交到仓库或 Issue。
+
+`IMAGE_MODE` 默认为 `sync`，直接调用标准同步接口。`auto` 会先尝试异步接口，不支持时回退同步；`async` 只用异步，失败不回退。后两种模式需要中转站提供相应的异步接口。
+
+更新源码会保留已有配置。如果旧配置中有 `IMAGE_MODE="auto"`，需要将其改为 `IMAGE_MODE="sync"` 才会省掉异步探测请求。
 
 ## 自动尺寸选择
 

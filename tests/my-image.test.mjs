@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectImageInfo, inferSize } from "../scripts/generate.mjs";
-import { editEndpoint, modelsEndpoint, normalizeBaseUrl, probeConnection } from "../scripts/verify-config.mjs";
+import { editEndpoint, loadConfig, modelsEndpoint, normalizeBaseUrl, probeConnection, saveConfig } from "../scripts/verify-config.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const configureScript = join(repoRoot, "scripts", "configure.mjs");
@@ -84,9 +84,20 @@ async function testConfigFile(root) {
   assert(!verified.stdout.includes(fakeKey), "verify output leaked API key");
   const status = JSON.parse(verified.stdout);
   assert.equal(status.config.model, "gpt-image-2.5");
+  assert.equal(status.config.mode, "sync");
   assert.equal(status.config.endpoint, "https://example.test/v1/images/generations");
   assert.equal(editEndpoint(status.config.baseUrl), "https://example.test/v1/images/edits");
   assert.throws(() => normalizeBaseUrl("https://example.test/v1?token=bad"));
+
+  // 配置文件缺少模式或模式无效时，也不能意外发出异步请求。
+  await writeFile(configPath, content.replace(/^IMAGE_MODE=.*\n/m, ""));
+  const legacy = await loadConfig({ configPath, env: {} });
+  assert.equal(legacy.config.mode, "sync");
+  const invalid = await loadConfig({ configPath, env: { IMAGE_MODE: "invalid" } });
+  assert.equal(invalid.config.mode, "sync");
+  assert(invalid.warnings.length > 0);
+  await saveConfig({ baseUrl: "https://example.test/v1", apiKey: fakeKey }, { configPath });
+  assert.equal((await loadConfig({ configPath, env: {} })).config.mode, "sync");
 }
 
 async function testBrowserSetup(root) {
@@ -389,6 +400,7 @@ async function testGeneration(root) {
     );
     assert.equal(base64Result.code, 0, base64Result.stderr);
     const base64Summary = JSON.parse(base64Result.stdout);
+    assert.equal(base64Summary.transport, "sync");
     assert.equal(base64Summary.results[0].actualSize, "1x1");
     assert.equal(base64Summary.results[0].requestedSize, "1024x1024");
 
@@ -428,7 +440,16 @@ async function testGeneration(root) {
     assert(!authResult.stdout.includes(fakeKey), "generation output leaked API key");
     assert.equal(JSON.parse(authResult.stdout).results[0].code, "AUTH_FAILED");
     assert(api.requests.generation.every((item) => item.model === "gpt-image-2.5"));
-    assert(api.requests.generation.every((item) => item.asyncSubmit), "generation should use async submit in auto mode");
+    assert(api.requests.generation.every((item) => !item.asyncSubmit), "default generation must not probe async endpoints");
+
+    const asyncResult = await run(
+      "node",
+      [generateScript, "--prompt", "explicit async 方形头像", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath, IMAGE_MODE: "async" } },
+    );
+    assert.equal(asyncResult.code, 0, asyncResult.stderr);
+    assert.equal(JSON.parse(asyncResult.stdout).transport, "async");
+    assert.equal(api.requests.generation.at(-1).asyncSubmit, true);
 
     assert.equal(modelsEndpoint(api.baseUrl), `${api.baseUrl}/models`);
     assert.equal(modelsEndpoint(`${api.baseUrl}/images/generations`), `${api.baseUrl}/models`);
@@ -497,6 +518,7 @@ async function testGeneration(root) {
     assert.equal(editResult.code, 0, `${editResult.stderr}\n${editResult.stdout}`);
     const editSummary = JSON.parse(editResult.stdout);
     assert.equal(editSummary.operation, "edit");
+    assert.equal(editSummary.transport, "sync");
     assert.equal(editSummary.results[0].actualSize, "1x1");
     const editRequest = api.requests.edit.at(-1);
     assert(editRequest.contentType.startsWith("multipart/form-data; boundary="));
@@ -512,13 +534,25 @@ async function testGeneration(root) {
     assert.equal(editAuthResult.code, 1);
     assert(!editAuthResult.stdout.includes(fakeKey), "edit output leaked API key");
     assert.equal(JSON.parse(editAuthResult.stdout).code, "AUTH_FAILED");
+    assert(api.requests.edit.every((item) => !item.asyncSubmit), "default edits must not probe async endpoints");
+
+    const asyncEditResult = await run(
+      "node",
+      [editScript, "--image", inputPath, "--prompt", "explicit async edit", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath, IMAGE_MODE: "async" } },
+    );
+    assert.equal(asyncEditResult.code, 0, asyncEditResult.stderr);
+    assert.equal(JSON.parse(asyncEditResult.stdout).transport, "async");
+    assert.equal(api.requests.edit.at(-1).asyncSubmit, true);
   } finally {
     await api.close();
   }
 }
 
 async function startSyncOnlyApi() {
+  const requests = [];
   const server = createServer(async (request, response) => {
+    requests.push(request.url);
     if (request.method === "POST" && request.url === "/v1/images/generations/async") {
       response.writeHead(404, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { message: "not found" } }));
@@ -541,6 +575,7 @@ async function startSyncOnlyApi() {
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   const address = server.address();
   return {
+    requests,
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     close: () => new Promise((resolveClose) => server.close(resolveClose)),
   };
@@ -553,16 +588,28 @@ async function testSyncFallback(root) {
     const outputDir = join(root, "sync-outputs");
     await configureViaStdin(configPath, api.baseUrl);
 
+    api.requests.length = 0;
+    const defaultResult = await run(
+      "node",
+      [generateScript, "--prompt", "default 方形头像", "--output-dir", outputDir],
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+    );
+    assert.equal(defaultResult.code, 0, defaultResult.stderr);
+    assert.equal(JSON.parse(defaultResult.stdout).transport, "sync");
+    assert.deepEqual(api.requests, ["/v1/images/generations"]);
+
     // auto 模式：异步 404 后应自动降级同步并成功出图
+    api.requests.length = 0;
     const autoResult = await run(
       "node",
       [generateScript, "--prompt", "sync-only 方形头像", "--output-dir", outputDir],
-      { env: { MY_IMAGE_GEN_ENV_FILE: configPath } },
+      { env: { MY_IMAGE_GEN_ENV_FILE: configPath, IMAGE_MODE: "auto" } },
     );
     assert.equal(autoResult.code, 0, autoResult.stderr);
     const autoSummary = JSON.parse(autoResult.stdout);
     assert.equal(autoSummary.transport, "sync");
     assert.equal(autoSummary.succeeded, 1);
+    assert.deepEqual(api.requests, ["/v1/images/generations/async", "/v1/images/generations"]);
 
     // 显式 async 模式：不支持异步时应直接失败而不是降级
     const asyncOnlyResult = await run(

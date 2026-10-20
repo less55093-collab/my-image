@@ -212,7 +212,7 @@ export async function loadConfig(options = {}) {
   const rawBaseUrl = firstValue(env, fileValues, "OPENAI_BASE_URL");
   const model = firstValue(env, fileValues, "IMAGE_MODEL", DEFAULT_MODEL);
   const defaultSize = firstValue(env, fileValues, "IMAGE_SIZE", "auto");
-  const rawMode = firstValue(env, fileValues, "IMAGE_MODE", "auto");
+  const rawMode = firstValue(env, fileValues, "IMAGE_MODE", "sync");
   const timeoutMs = positiveInteger(
     firstValue(env, fileValues, "TIMEOUT_MS", String(DEFAULT_TIMEOUT_MS)),
     DEFAULT_TIMEOUT_MS,
@@ -264,10 +264,10 @@ export async function loadConfig(options = {}) {
 }
 
 export function normalizeImageMode(value, warnings) {
-  const mode = String(value || "auto").trim().toLowerCase();
+  const mode = String(value || "sync").trim().toLowerCase();
   if (["auto", "async", "sync"].includes(mode)) return mode;
-  if (Array.isArray(warnings)) warnings.push(`IMAGE_MODE 仅支持 auto/async/sync，已按 auto 处理: ${value}`);
-  return "auto";
+  if (Array.isArray(warnings)) warnings.push(`IMAGE_MODE 仅支持 auto/async/sync，已按 sync 处理: ${value}`);
+  return "sync";
 }
 
 function envLine(key, value) {
@@ -290,7 +290,7 @@ export async function saveConfig(values, options = {}) {
     envLine("OPENAI_API_KEY", apiKey),
     envLine("IMAGE_MODEL", model),
     envLine("IMAGE_SIZE", values.defaultSize || "auto"),
-    envLine("IMAGE_MODE", values.mode || "auto"),
+    envLine("IMAGE_MODE", normalizeImageMode(values.mode)),
     envLine("TIMEOUT_MS", values.timeoutMs || DEFAULT_TIMEOUT_MS),
     "",
   ].join("\n");

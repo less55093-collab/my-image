@@ -7,11 +7,13 @@ description: Generate, edit, and display images through a user-supplied OpenAI-c
 
 通过用户的 OpenAI 兼容接口生成或编辑图片。请求模式由 `IMAGE_MODE` 配置决定：
 
-- `auto`（默认）：优先走异步端点（`/images/generations/async`、`/images/edits/async` + 轮询 `/images/tasks/:id`），网关会把图片转存到对象存储（如 R2）；如果中转站不支持异步（提交返回 404/405/501），自动降级为同步端点。
+- `sync`（默认）：直接走同步端点（`/images/generations`、`/images/edits`），不探测异步接口，避免在未启用异步任务的中转站留下额外的 404 日志。
+- `auto`：显式选择后优先走异步端点（`/images/generations/async`、`/images/edits/async` + 轮询 `/images/tasks/:id`）；如果中转站不支持异步（提交返回 404/405/501），自动降级为同步端点。
 - `async`：只用异步，失败不降级。
-- `sync`：只用同步端点（`/images/generations`、`/images/edits`），兼容性最好。
 
 配置方式：环境变量或在 configure 的 stdin JSON / 配置文件中加 `"mode": "sync"` 等。脚本输出 JSON 中的 `transport` 字段标明本次实际走了 `async` 还是 `sync`。
+
+已有配置中的 `IMAGE_MODE="auto"` 或 `"async"` 会继续生效；更新源码不会覆盖用户选择。如需直接同步调用，将已有配置中的 `IMAGE_MODE` 改为 `"sync"`。
 
 ## 快速上手（agent 按此顺序执行）
 
@@ -30,7 +32,7 @@ node <skill-dir>/scripts/verify-config.mjs --json
 - 用户已经在消息里同时给出 Base URL 和 API Key 时，直接用 stdin 写入（**不要把 key 放进命令行参数、文件或回显输出**）：
 
   ```bash
-  printf '%s' '{"baseUrl":"<base-url>","apiKey":"<api-key>","model":"gpt-image-2.5","mode":"auto"}' \
+  printf '%s' '{"baseUrl":"<base-url>","apiKey":"<api-key>","model":"gpt-image-2.5","mode":"sync"}' \
     | node <skill-dir>/scripts/configure.mjs --stdin-json
   ```
 

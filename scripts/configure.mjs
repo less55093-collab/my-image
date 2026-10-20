@@ -61,7 +61,7 @@ async function save(values, { skipVerify = false } = {}) {
     apiKey,
     model,
     defaultSize: values.defaultSize ?? values.IMAGE_SIZE ?? "auto",
-    mode: values.mode ?? values.IMAGE_MODE ?? "auto",
+    mode: values.mode ?? values.IMAGE_MODE ?? "sync",
     timeoutMs: values.timeoutMs ?? values.TIMEOUT_MS ?? 300_000,
   });
   return { ...result, verification, warnings: [...verificationWarnings(values, verification), ...applyWindowsAcl(result.configPath)] };

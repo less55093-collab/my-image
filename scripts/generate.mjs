@@ -343,7 +343,7 @@ async function main() {
   const timeoutMs = options.timeoutMs || status.config.timeoutMs;
   const outputDir = resolve(options.outputDir || "outputs/my-image");
   const concurrency = Math.min(options.concurrency, options.count);
-  const mode = status.config.mode || "auto";
+  const mode = status.config.mode || "sync";
   const endpoint = mode === "sync"
     ? syncEndpoint(status.config.baseUrl, "generate")
     : asyncEndpoint(status.config.baseUrl, "generate");

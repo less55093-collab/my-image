@@ -186,7 +186,7 @@ async function main() {
   const sizeSelection = selectEditSize(options.size, images[0], model);
   const timeoutMs = options.timeoutMs || status.config.timeoutMs;
   const outputDir = resolve(options.outputDir || "outputs/my-image");
-  const mode = status.config.mode || "auto";
+  const mode = status.config.mode || "sync";
   const endpoint = mode === "sync"
     ? syncEndpoint(status.config.baseUrl, "edit")
     : asyncEndpoint(status.config.baseUrl, "edit");
