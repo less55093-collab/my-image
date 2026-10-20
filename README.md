@@ -37,14 +37,14 @@
 ### macOS / Linux
 
 ```bash
-git clone https://gitee.com/chenyifan888/my-image.git \
+git clone https://github.com/less55093-collab/my-image.git \
   "${CODEX_HOME:-$HOME/.codex}/skills/my-image"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-git clone https://gitee.com/chenyifan888/my-image.git `
+git clone https://github.com/less55093-collab/my-image.git `
   "$env:USERPROFILE\.codex\skills\my-image"
 ```
 
